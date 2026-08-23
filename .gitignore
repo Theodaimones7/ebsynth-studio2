@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# C/C++ and PyInstaller build products
+build/
+dist/
+bin/*.exe
+bin/*.dll
+lib/*.lib
+*.obj
+*.exp
+*.spec
+
+# Local test/download caches
+.cache_download/
+.cache_editor_test/
+
+# User projects created by EbSynth Studio 2
+project.ebsynth.json
+media/
+cache/
+output/
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
