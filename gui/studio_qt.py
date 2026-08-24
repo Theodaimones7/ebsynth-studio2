@@ -366,9 +366,10 @@ class LayerItem(QGraphicsObject):
             return
         width = 2.0 / max(abs(self.scale()), 0.05)
         painter.setPen(QPen(ACCENT, width, Qt.PenStyle.SolidLine))
-        painter.setBrush(QColor("#ffffff"))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(rect)
         radius = 6.0 / max(abs(self.scale()), 0.05)
+        painter.setBrush(QColor("#ffffff"))
         for point in (rect.topLeft(), rect.topRight(), rect.bottomLeft(), rect.bottomRight()):
             painter.drawEllipse(point, radius, radius)
         rotation_point = QPointF(0, rect.top() - 28.0 / max(abs(self.scale()), 0.05))
@@ -687,7 +688,9 @@ class MainWindow(QMainWindow):
         self.redo_action = QAction("Повторить", self); self.redo_action.setShortcut(QKeySequence.StandardKey.Redo); self.redo_action.triggered.connect(self.redo)
         self.delete_action = QAction("Удалить слой", self); self.delete_action.setShortcut(QKeySequence.StandardKey.Delete); self.delete_action.triggered.connect(self.delete_selected_layer)
         self.settings_action = QAction("Настройки", self); self.settings_action.triggered.connect(self.show_settings)
-        for action in (self.new_action, self.open_action, self.save_action, self.import_frames_action, self.import_video_action, self.undo_action, self.redo_action, self.delete_action, self.settings_action):
+        self.clear_result_action = QAction("Удалить результат", self); self.clear_result_action.triggered.connect(self.clear_render_result)
+        self.restart_action = QAction("Начать сначала", self); self.restart_action.triggered.connect(self.restart_project)
+        for action in (self.new_action, self.open_action, self.save_action, self.import_frames_action, self.import_video_action, self.undo_action, self.redo_action, self.delete_action, self.settings_action, self.clear_result_action, self.restart_action):
             self.addAction(action)
 
     def _build_ui(self) -> None:
@@ -696,6 +699,7 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator(); toolbar.addAction(self.import_frames_action); toolbar.addAction(self.import_video_action)
         toolbar.addSeparator(); toolbar.addAction(self.undo_action); toolbar.addAction(self.redo_action)
         toolbar.addSeparator(); toolbar.addAction(self.settings_action)
+        toolbar.addSeparator(); toolbar.addAction(self.clear_result_action); toolbar.addAction(self.restart_action)
 
         central = QWidget(); root = QVBoxLayout(central); root.setContentsMargins(10, 10, 10, 8); root.setSpacing(8); self.setCentralWidget(central)
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -1046,6 +1050,72 @@ class MainWindow(QMainWindow):
         if not self.project: QMessageBox.information(self, APP_NAME, "Сначала создайте проект."); return
         dialog = SettingsDialog(self.project, self)
         if dialog.exec() == QDialog.DialogCode.Accepted: dialog.apply(); self.project.save()
+
+    def clear_render_result(self) -> None:
+        if not self.project:
+            QMessageBox.information(self, APP_NAME, "Нет открытого проекта.")
+            return
+        if self.render_worker and self.render_worker.isRunning():
+            QMessageBox.information(self, APP_NAME, "Сначала остановите текущий рендер.")
+            return
+        folders = (self.project.output_dir, self.project.styles_dir)
+        if not any(folder.is_dir() and any(folder.iterdir()) for folder in folders):
+            self.status_label.setText("Сохранённого результата пока нет")
+            return
+        answer = QMessageBox.question(
+            self,
+            APP_NAME,
+            "Удалить все сгенерированные кадры? Исходник и keyframes сохранятся.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            for folder in folders:
+                if folder.exists():
+                    shutil.rmtree(folder)
+                folder.mkdir(parents=True, exist_ok=True)
+            if self.mode_combo.currentText() == "Результат":
+                self.mode_combo.setCurrentText("Композиция")
+            self.refresh_viewer()
+            self.status_label.setText("Результат удалён. Можно запустить EbSynth заново.")
+        except OSError as exc:
+            QMessageBox.critical(self, APP_NAME, f"Не удалось удалить результат: {exc}")
+
+    def restart_project(self) -> None:
+        if not self.project:
+            self.status_label.setText("Проект уже пуст — перетащите кадры анимации")
+            return
+        if self.render_worker and self.render_worker.isRunning():
+            QMessageBox.information(self, APP_NAME, "Сначала остановите текущий рендер.")
+            return
+        answer = QMessageBox.question(
+            self,
+            APP_NAME,
+            "Начать сначала? Копии исходных кадров, keyframes и результат в папке проекта будут удалены.",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        project = self.project
+        try:
+            self.play_timer.stop()
+            self.autosave.stop()
+            managed_folders = (project.frames_dir, project.assets_dir, project.source_dir, project.styles_dir, project.output_dir)
+            for folder in managed_folders:
+                if folder.exists():
+                    shutil.rmtree(folder)
+            if project.file_path.exists():
+                project.file_path.unlink()
+            for folder in (project.root / "media", project.root / "cache"):
+                if folder.is_dir() and not any(folder.iterdir()):
+                    folder.rmdir()
+            self.project = None
+            self._history = []
+            self._history_index = -1
+            self.mode_combo.setCurrentText("Композиция")
+            self.update_project_ui()
+            self.status_label.setText("Готово. Перетащите кадры новой анимации.")
+        except OSError as exc:
+            QMessageBox.critical(self, APP_NAME, f"Не удалось очистить проект: {exc}")
 
     def start_render(self) -> None:
         if not self.project or not self.project.frames: return
