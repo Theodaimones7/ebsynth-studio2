@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
     QGraphicsView,
     QGroupBox,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -162,6 +163,40 @@ def compose_frame(project: Project, frame_index: int, destination: Path) -> Path
     if not base.save(str(destination), "PNG"):
         raise RuntimeError(f"Не удалось сохранить {destination.name}.")
     return destination
+
+
+def build_sprite_sheet(frame_paths: list[Path], columns: int, destination: Path) -> tuple[int, int]:
+    if not frame_paths:
+        raise ValueError("Нет кадров для экспорта.")
+    if columns < 1:
+        raise ValueError("Число колонок должно быть больше нуля.")
+    first = QImage(str(frame_paths[0]))
+    if first.isNull():
+        raise ValueError(f"Не удалось открыть кадр: {frame_paths[0].name}")
+    frame_width, frame_height = first.width(), first.height()
+    rows = math.ceil(len(frame_paths) / columns)
+    sheet_width, sheet_height = frame_width * columns, frame_height * rows
+    if sheet_width > 32767 or sheet_height > 32767 or sheet_width * sheet_height > 150_000_000:
+        raise ValueError("Спрайтшит слишком большой. Сохраните кадры отдельно или разделите анимацию.")
+    sheet = QImage(sheet_width, sheet_height, QImage.Format.Format_ARGB32)
+    if sheet.isNull():
+        raise RuntimeError("Не удалось выделить память для спрайтшита.")
+    sheet.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(sheet)
+    for index, path in enumerate(frame_paths):
+        frame = first if index == 0 else QImage(str(path))
+        if frame.isNull():
+            painter.end()
+            raise ValueError(f"Не удалось открыть кадр: {path.name}")
+        if frame.size() != first.size():
+            painter.end()
+            raise ValueError(f"Размер кадра {path.name} отличается от остальных.")
+        painter.drawImage((index % columns) * frame_width, (index // columns) * frame_height, frame)
+    painter.end()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if not sheet.save(str(destination), "PNG"):
+        raise RuntimeError(f"Не удалось сохранить файл: {destination}")
+    return columns, rows
 
 
 class VideoImportWorker(QThread):
@@ -688,9 +723,11 @@ class MainWindow(QMainWindow):
         self.redo_action = QAction("Повторить", self); self.redo_action.setShortcut(QKeySequence.StandardKey.Redo); self.redo_action.triggered.connect(self.redo)
         self.delete_action = QAction("Удалить слой", self); self.delete_action.setShortcut(QKeySequence.StandardKey.Delete); self.delete_action.triggered.connect(self.delete_selected_layer)
         self.settings_action = QAction("Настройки", self); self.settings_action.triggered.connect(self.show_settings)
+        self.export_frames_action = QAction("Сохранить кадры…", self); self.export_frames_action.triggered.connect(self.export_rendered_frames)
+        self.export_sheet_action = QAction("Сохранить спрайтшит…", self); self.export_sheet_action.triggered.connect(self.export_sprite_sheet)
         self.clear_result_action = QAction("Удалить результат", self); self.clear_result_action.triggered.connect(self.clear_render_result)
         self.restart_action = QAction("Начать сначала", self); self.restart_action.triggered.connect(self.restart_project)
-        for action in (self.new_action, self.open_action, self.save_action, self.import_frames_action, self.import_video_action, self.undo_action, self.redo_action, self.delete_action, self.settings_action, self.clear_result_action, self.restart_action):
+        for action in (self.new_action, self.open_action, self.save_action, self.import_frames_action, self.import_video_action, self.undo_action, self.redo_action, self.delete_action, self.settings_action, self.export_frames_action, self.export_sheet_action, self.clear_result_action, self.restart_action):
             self.addAction(action)
 
     def _build_ui(self) -> None:
@@ -699,6 +736,7 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator(); toolbar.addAction(self.import_frames_action); toolbar.addAction(self.import_video_action)
         toolbar.addSeparator(); toolbar.addAction(self.undo_action); toolbar.addAction(self.redo_action)
         toolbar.addSeparator(); toolbar.addAction(self.settings_action)
+        toolbar.addSeparator(); toolbar.addAction(self.export_frames_action); toolbar.addAction(self.export_sheet_action)
         toolbar.addSeparator(); toolbar.addAction(self.clear_result_action); toolbar.addAction(self.restart_action)
 
         central = QWidget(); root = QVBoxLayout(central); root.setContentsMargins(10, 10, 10, 8); root.setSpacing(8); self.setCentralWidget(central)
@@ -1060,7 +1098,16 @@ class MainWindow(QMainWindow):
     def update_project_ui(self) -> None:
         self.populate_assets(); self.populate_layers(); self.timeline.set_project(self.project); self.refresh_viewer()
         has_frames = bool(self.project and self.project.frames)
+        has_render = bool(self.rendered_frame_paths())
+        has_result_files = bool(
+            self.project
+            and any(folder.is_dir() and any(folder.iterdir()) for folder in (self.project.output_dir, self.project.styles_dir))
+        )
         for widget in (self.play_button, self.prev_button, self.next_button, self.render_button, self.mode_combo): widget.setEnabled(has_frames)
+        self.export_frames_action.setEnabled(has_render)
+        self.export_sheet_action.setEnabled(has_render)
+        self.clear_result_action.setEnabled(has_result_files)
+        self.restart_action.setEnabled(bool(self.project))
         if self.project and has_frames:
             self.frame_label.setText(f"Кадр {self.current_frame() + 1} / {self.project.frame_count}"); self.setWindowTitle(f"{APP_NAME} — {self.project.name}")
         else: self.frame_label.setText("Кадр — / —"); self.setWindowTitle(APP_NAME)
@@ -1070,6 +1117,71 @@ class MainWindow(QMainWindow):
         if not self.project: QMessageBox.information(self, APP_NAME, "Сначала создайте проект."); return
         dialog = SettingsDialog(self.project, self)
         if dialog.exec() == QDialog.DialogCode.Accepted: dialog.apply(); self.project.save()
+
+    def rendered_frame_paths(self) -> list[Path]:
+        if not self.project or not self.project.frames:
+            return []
+        paths = [self.project.output_dir / f"frame_{index + 1:06d}.png" for index in range(self.project.frame_count)]
+        return paths if all(path.is_file() for path in paths) else []
+
+    def export_rendered_frames(self) -> None:
+        frames = self.rendered_frame_paths()
+        if not frames:
+            QMessageBox.information(self, APP_NAME, "Сначала завершите рендер всех кадров.")
+            return
+        folder = QFileDialog.getExistingDirectory(self, "Выберите папку для готовых кадров")
+        if not folder:
+            return
+        destination = Path(folder).resolve()
+        if destination == frames[0].parent.resolve():
+            QMessageBox.information(self, APP_NAME, f"Кадры уже находятся в этой папке:\n{destination}")
+            return
+        existing = [destination / path.name for path in frames if (destination / path.name).exists()]
+        if existing:
+            answer = QMessageBox.question(
+                self,
+                APP_NAME,
+                f"Заменить существующие кадры? Файлов: {len(existing)}.",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            destination.mkdir(parents=True, exist_ok=True)
+            for path in frames:
+                shutil.copy2(path, destination / path.name)
+            self.status_label.setText(f"Сохранено кадров: {len(frames)}")
+            QMessageBox.information(self, APP_NAME, f"Кадры сохранены:\n{destination}")
+        except OSError as exc:
+            QMessageBox.critical(self, APP_NAME, f"Не удалось сохранить кадры: {exc}")
+
+    def export_sprite_sheet(self) -> None:
+        frames = self.rendered_frame_paths()
+        if not frames:
+            QMessageBox.information(self, APP_NAME, "Сначала завершите рендер всех кадров.")
+            return
+        default_path = str(self.project.root / "spritesheet.png") if self.project else "spritesheet.png"
+        file_name, _ = QFileDialog.getSaveFileName(self, "Сохранить спрайтшит", default_path, "PNG (*.png)")
+        if not file_name:
+            return
+        columns, accepted = QInputDialog.getInt(
+            self,
+            "Размер спрайтшита",
+            "Колонок:",
+            max(1, math.ceil(math.sqrt(len(frames)))),
+            1,
+            len(frames),
+        )
+        if not accepted:
+            return
+        destination = Path(file_name)
+        if destination.suffix.casefold() != ".png":
+            destination = destination.with_suffix(".png")
+        try:
+            columns, rows = build_sprite_sheet(frames, columns, destination)
+            self.status_label.setText(f"Спрайтшит сохранён: {columns} × {rows} ячеек")
+            QMessageBox.information(self, APP_NAME, f"Спрайтшит сохранён:\n{destination}")
+        except (OSError, RuntimeError, ValueError) as exc:
+            QMessageBox.critical(self, APP_NAME, str(exc))
 
     def clear_render_result(self) -> None:
         if not self.project:
@@ -1096,7 +1208,7 @@ class MainWindow(QMainWindow):
                 folder.mkdir(parents=True, exist_ok=True)
             if self.mode_combo.currentText() == "Результат":
                 self.mode_combo.setCurrentText("Композиция")
-            self.refresh_viewer()
+            self.update_project_ui()
             self.status_label.setText("Результат удалён. Можно запустить EbSynth заново.")
         except OSError as exc:
             QMessageBox.critical(self, APP_NAME, f"Не удалось удалить результат: {exc}")
@@ -1165,6 +1277,11 @@ class MainWindow(QMainWindow):
 
     def set_busy(self, busy: bool, message: str = "") -> None:
         for action in (self.new_action, self.open_action, self.import_frames_action, self.import_video_action): action.setEnabled(not busy)
+        if busy:
+            for action in (self.export_frames_action, self.export_sheet_action, self.clear_result_action, self.restart_action):
+                action.setEnabled(False)
+        else:
+            self.update_project_ui()
         if message: self.status_label.setText(message)
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[no-untyped-def]
