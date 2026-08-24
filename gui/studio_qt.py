@@ -140,6 +140,29 @@ def layer_dict(layer: Layer) -> dict[str, object]:
     }
 
 
+def snap_layer_position(
+    position: QPointF,
+    frame_rect: QRectF,
+    image_width: float,
+    image_height: float,
+    scale: float,
+    threshold: float | None = None,
+) -> QPointF:
+    if not frame_rect.isValid():
+        return QPointF(position)
+    distance = threshold if threshold is not None else max(6.0, min(frame_rect.width(), frame_rect.height()) * 0.012)
+    half_width = image_width * abs(scale) / 2
+    half_height = image_height * abs(scale) / 2
+    x_targets = (frame_rect.center().x(), frame_rect.left() + half_width, frame_rect.right() - half_width)
+    y_targets = (frame_rect.center().y(), frame_rect.top() + half_height, frame_rect.bottom() - half_height)
+
+    def snap(value: float, targets: tuple[float, ...]) -> float:
+        target = min(targets, key=lambda candidate: abs(candidate - value))
+        return target if abs(target - value) <= distance else value
+
+    return QPointF(snap(position.x(), x_targets), snap(position.y(), y_targets))
+
+
 def compose_frame(project: Project, frame_index: int, destination: Path) -> Path:
     base = QImage(str(project.frame_path(frame_index))).convertToFormat(QImage.Format.Format_ARGB32)
     if base.isNull():
@@ -365,10 +388,11 @@ class LayerItem(QGraphicsObject):
     interactionFinished = Signal(object)
     interactionStarted = Signal()
 
-    def __init__(self, pixmap: QPixmap, layer: Layer) -> None:
+    def __init__(self, pixmap: QPixmap, layer: Layer, frame_rect: QRectF | None = None) -> None:
         super().__init__()
         self.pixmap = pixmap
         self.layer = layer
+        self.frame_rect = QRectF(frame_rect) if frame_rect is not None else QRectF()
         self._mode = "move"
         self._start_scale = layer.scale
         self._start_distance = 1.0
@@ -458,6 +482,9 @@ class LayerItem(QGraphicsObject):
         self.interactionFinished.emit(self.layer)
 
     def itemChange(self, change, value):  # type: ignore[no-untyped-def]
+        if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and not self._syncing:
+            if not QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier:
+                return snap_layer_position(value, self.frame_rect, self.pixmap.width(), self.pixmap.height(), self.scale())
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged and not self._syncing:
             point = value
             self.layer.center_x = point.x()
@@ -486,7 +513,7 @@ class FrameView(QGraphicsView):
         self.mode = "Композиция"
         self.layer_items: dict[str, LayerItem] = {}
 
-    def set_frame(self, project: Project | None, index: int, mode: str) -> None:
+    def set_frame(self, project: Project | None, index: int, mode: str, contrast_layers: bool = False) -> None:
         self.project, self.frame_index, self.mode = project, index, mode
         self.scene_model.clear()
         self.layer_items.clear()
@@ -500,16 +527,31 @@ class FrameView(QGraphicsView):
         pixmap = QPixmap(str(source))
         base = self.scene_model.addPixmap(pixmap)
         base.setZValue(-1000)
+        layers = project.compositions.get(index, [])
+        if mode == "Композиция" and contrast_layers and layers:
+            base.setOpacity(0.3)
         self.scene_model.setSceneRect(0, 0, project.width, project.height)
         if mode == "Композиция":
-            for layer in sorted(project.compositions.get(index, []), key=lambda value: value.z):
+            for layer in sorted(layers, key=lambda value: value.z):
                 asset_pixmap = QPixmap(str(project.asset_path(layer.asset_id)))
-                item = LayerItem(asset_pixmap, layer)
+                item = LayerItem(asset_pixmap, layer, self.scene_model.sceneRect())
                 item.interactionStarted.connect(self.interactionStarted)
                 item.interactionFinished.connect(self.layerChanged)
                 self.scene_model.addItem(item)
                 self.layer_items[layer.id] = item
         self.fitInView(self.scene_model.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
+
+    def drawBackground(self, painter: QPainter, rect: QRectF) -> None:  # type: ignore[override]
+        tile = 24
+        light = QColor("#303746")
+        dark = QColor("#1c222d")
+        left = math.floor(rect.left() / tile) * tile
+        top = math.floor(rect.top() / tile) * tile
+        right = math.ceil(rect.right() / tile) * tile
+        bottom = math.ceil(rect.bottom() / tile) * tile
+        for y in range(top, bottom, tile):
+            for x in range(left, right, tile):
+                painter.fillRect(QRectF(x, y, tile, tile), light if ((x // tile) + (y // tile)) % 2 == 0 else dark)
 
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         super().resizeEvent(event)
@@ -750,7 +792,7 @@ class MainWindow(QMainWindow):
 
         side = QWidget(); side.setMinimumWidth(295); side.setMaximumWidth(380); side_layout = QVBoxLayout(side); side_layout.setContentsMargins(12, 4, 4, 4)
         heading = QLabel("KEYFRAMES"); heading.setStyleSheet("font-weight: 700; font-size: 12pt; color: #ff6b88;"); side_layout.addWidget(heading)
-        hint = QLabel("Перетащите PNG/JPG сюда, затем на кадр или в окно просмотра."); hint.setWordWrap(True); hint.setStyleSheet(f"color:{MUTED};"); side_layout.addWidget(hint)
+        hint = QLabel("Перетащите PNG/JPG сюда, затем на кадр или в окно просмотра. Shift отключает магнит."); hint.setWordWrap(True); hint.setStyleSheet(f"color:{MUTED};"); side_layout.addWidget(hint)
         self.assets = AssetList(); self.assets.filesDropped.connect(lambda files: self.import_keyframes(files)); self.assets.itemDoubleClicked.connect(self.asset_double_clicked); side_layout.addWidget(self.assets, 2)
         asset_buttons = QHBoxLayout(); import_asset = QPushButton("+ Добавить"); import_asset.clicked.connect(self.import_keyframe_dialog); remove_asset = QPushButton("Удалить"); remove_asset.clicked.connect(self.remove_asset); asset_buttons.addWidget(import_asset); asset_buttons.addWidget(remove_asset); side_layout.addLayout(asset_buttons)
         side_layout.addWidget(QLabel("СЛОИ ТЕКУЩЕГО КАДРА"))
@@ -776,6 +818,7 @@ class MainWindow(QMainWindow):
         controls.addStretch(); controls.addWidget(QLabel("FPS")); self.fps_field = QDoubleSpinBox(); self.fps_field.setRange(1, 120); self.fps_field.setDecimals(2); self.fps_field.setValue(12); self.fps_field.valueChanged.connect(self.fps_changed); controls.addWidget(self.fps_field)
         self.loop_check = QCheckBox("Цикл"); self.loop_check.setChecked(True); controls.addWidget(self.loop_check)
         controls.addWidget(QLabel("Просмотр")); self.mode_combo = QComboBox(); self.mode_combo.addItems(["Композиция", "Исходник", "Результат"]); self.mode_combo.currentTextChanged.connect(self.refresh_viewer); controls.addWidget(self.mode_combo)
+        self.contrast_check = QCheckBox("Выделить спрайт"); self.contrast_check.setChecked(True); self.contrast_check.setToolTip("Затемняет исходный кадр только в предпросмотре."); self.contrast_check.toggled.connect(self.refresh_viewer); controls.addWidget(self.contrast_check)
         root.addLayout(controls)
         scroll = QScrollArea(); scroll.setWidgetResizable(False); scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff); scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded); scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.timeline = Timeline(); self.timeline.frameSelected.connect(self.set_frame); self.timeline.assetDropped.connect(lambda asset, index: self.add_layer(asset, index)); self.timeline.filesDropped.connect(lambda files, index: self.handle_source_or_keyframe_drop(files, frame_index=index)); scroll.setWidget(self.timeline); self.timeline_scroll = scroll; root.addWidget(scroll)
@@ -948,8 +991,15 @@ class MainWindow(QMainWindow):
             return
         frame_index = max(0, min(frame_index, self.project.frame_count - 1))
         width, height = read_image_size(self.project.asset_path(asset_id))
-        scale = min(1.0, self.project.width * 0.8 / max(width, 1), self.project.height * 0.8 / max(height, 1))
+        scale = 1.0
         center = point or QPointF(self.project.width / 2, self.project.height / 2)
+        center = snap_layer_position(
+            center,
+            QRectF(0, 0, self.project.width, self.project.height),
+            width,
+            height,
+            scale,
+        )
         layers = self.project.compositions.setdefault(frame_index, [])
         layers.append(Layer.create(asset_id, center.x(), center.y(), scale, len(layers)))
         self.project.playhead = frame_index; self.record_history(); self.schedule_save(); self.update_project_ui(); self.set_frame(frame_index)
@@ -1061,8 +1111,18 @@ class MainWindow(QMainWindow):
         x = self.project.playhead * self.timeline.CELL_W; self.timeline_scroll.horizontalScrollBar().setValue(max(0, x - self.timeline_scroll.viewport().width() // 2))
 
     def refresh_viewer(self, _value=None) -> None:  # type: ignore[no-untyped-def]
-        if self.project and self.project.frames: self.viewer.set_frame(self.project, self.current_frame(), self.mode_combo.currentText())
-        else: self.viewer.set_frame(None, 0, "Композиция")
+        has_frames = bool(self.project and self.project.frames)
+        composition_mode = self.mode_combo.currentText() == "Композиция"
+        self.contrast_check.setEnabled(has_frames and composition_mode)
+        if has_frames and self.project:
+            self.viewer.set_frame(
+                self.project,
+                self.current_frame(),
+                self.mode_combo.currentText(),
+                self.contrast_check.isChecked(),
+            )
+        else:
+            self.viewer.set_frame(None, 0, "Композиция")
 
     def toggle_playback(self) -> None:
         if self.play_timer.isActive(): self.play_timer.stop(); self.play_button.setText("▶")
