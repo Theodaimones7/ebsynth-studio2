@@ -701,7 +701,7 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self.viewer = FrameView(); splitter.addWidget(self.viewer)
         self.viewer.assetDropped.connect(lambda asset, point: self.add_layer(asset, self.current_frame(), point))
-        self.viewer.filesDropped.connect(lambda files, point: self.import_keyframes(files, self.current_frame(), point))
+        self.viewer.filesDropped.connect(lambda files, point: self.handle_source_or_keyframe_drop(files, point=point))
         self.viewer.layerChanged.connect(self.on_layer_changed)
         self.viewer.interactionStarted.connect(lambda: None)
         self.viewer.selectionChanged.connect(self.select_layer)
@@ -736,7 +736,7 @@ class MainWindow(QMainWindow):
         controls.addWidget(QLabel("Просмотр")); self.mode_combo = QComboBox(); self.mode_combo.addItems(["Композиция", "Исходник", "Результат"]); self.mode_combo.currentTextChanged.connect(self.refresh_viewer); controls.addWidget(self.mode_combo)
         root.addLayout(controls)
         scroll = QScrollArea(); scroll.setWidgetResizable(False); scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff); scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded); scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.timeline = Timeline(); self.timeline.frameSelected.connect(self.set_frame); self.timeline.assetDropped.connect(lambda asset, index: self.add_layer(asset, index)); self.timeline.filesDropped.connect(lambda files, index: self.import_keyframes(files, index)); scroll.setWidget(self.timeline); self.timeline_scroll = scroll; root.addWidget(scroll)
+        self.timeline = Timeline(); self.timeline.frameSelected.connect(self.set_frame); self.timeline.assetDropped.connect(lambda asset, index: self.add_layer(asset, index)); self.timeline.filesDropped.connect(lambda files, index: self.handle_source_or_keyframe_drop(files, frame_index=index)); scroll.setWidget(self.timeline); self.timeline_scroll = scroll; root.addWidget(scroll)
 
         status = QStatusBar(); self.setStatusBar(status); self.status_label = QLabel("Создайте проект и откройте кадры"); status.addWidget(self.status_label, 1)
         self.progress = QProgressBar(); self.progress.setFixedWidth(260); self.progress.hide(); status.addPermanentWidget(self.progress)
@@ -850,6 +850,19 @@ class MainWindow(QMainWindow):
         files, _ = QFileDialog.getOpenFileNames(self, "Добавить keyframes", filter="Images (*.png *.jpg *.jpeg *.bmp *.tga *.webp)")
         if files:
             self.import_keyframes([Path(path) for path in files])
+
+    def handle_source_or_keyframe_drop(
+        self,
+        paths: list[Path],
+        point: QPointF | None = None,
+        frame_index: int | None = None,
+    ) -> None:
+        """Import dropped images as source frames until a source is loaded."""
+        if not self.project or not self.project.frames:
+            self.import_frames(paths)
+            return
+        target_frame = self.current_frame() if frame_index is None else frame_index
+        self.import_keyframes(paths, target_frame, point)
 
     def import_keyframes(self, paths: list[Path], frame_index: int | None = None, point: QPointF | None = None) -> None:
         if not self.project or not self.project.frames:
