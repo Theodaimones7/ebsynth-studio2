@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QFileDialog
 
 from gui.studio_qt import MainWindow
@@ -16,7 +17,7 @@ class AutomaticProjectTests(unittest.TestCase):
     def test_drag_import_can_create_project_without_folder_dialog(self):
         with tempfile.TemporaryDirectory() as folder:
             projects_root = Path(folder) / "Projects"
-            window = MainWindow()
+            window = MainWindow(QSettings(str(Path(folder) / "settings.ini"), QSettings.Format.IniFormat))
             window.automatic_projects_root = lambda: projects_root
 
             with patch.object(QFileDialog, "getExistingDirectory") as folder_dialog:

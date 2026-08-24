@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from PySide6.QtCore import QPointF, QRectF
+from PySide6.QtCore import QPointF, QRectF, QSettings
 from PySide6.QtWidgets import QApplication
 
 from gui.editor_model import Project, copy_sequence
@@ -40,7 +40,7 @@ class LayerSnappingTests(unittest.TestCase):
             frames = copy_sequence(project, [example / "source_segment.png"])
             project.width, project.height = read_image_size(frames[0])
             asset = project.add_asset(example / "source_photo.png")
-            window = MainWindow()
+            window = MainWindow(QSettings(str(Path(folder) / "settings.ini"), QSettings.Format.IniFormat))
             window.project = project
 
             window.add_layer(asset.id, 0, QPointF(100, 100))

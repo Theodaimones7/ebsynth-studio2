@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QMimeData, QPointF, QRectF, QSize, QStandardPaths, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QMimeData, QPointF, QRectF, QSize, QSettings, QStandardPaths, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -717,7 +718,7 @@ class SettingsDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, settings: QSettings | None = None) -> None:
         super().__init__()
         self.setWindowTitle(APP_NAME)
         self.resize(1440, 900)
@@ -729,6 +730,8 @@ class MainWindow(QMainWindow):
         self._history: list[str] = []
         self._history_index = -1
         self._updating_properties = False
+        self.settings = settings if settings is not None else QSettings("EbSynthStudio", "EbSynthStudio2")
+        self._recent_project_paths = self.read_recent_project_paths()
         self.autosave = QTimer(self); self.autosave.setSingleShot(True); self.autosave.timeout.connect(self.save_project)
         self.play_timer = QTimer(self); self.play_timer.timeout.connect(self.advance_playback)
         self._build_actions()
@@ -769,12 +772,15 @@ class MainWindow(QMainWindow):
         self.export_sheet_action = QAction("Сохранить спрайтшит…", self); self.export_sheet_action.triggered.connect(self.export_sprite_sheet)
         self.clear_result_action = QAction("Удалить результат", self); self.clear_result_action.triggered.connect(self.clear_render_result)
         self.restart_action = QAction("Начать сначала", self); self.restart_action.triggered.connect(self.restart_project)
+        self.recent_menu = QMenu("Недавние проекты", self)
+        self.update_recent_projects_menu()
         for action in (self.new_action, self.open_action, self.save_action, self.import_frames_action, self.import_video_action, self.undo_action, self.redo_action, self.delete_action, self.settings_action, self.export_frames_action, self.export_sheet_action, self.clear_result_action, self.restart_action):
             self.addAction(action)
 
     def _build_ui(self) -> None:
         toolbar = QToolBar("Проект", self); toolbar.setMovable(False); self.addToolBar(toolbar)
-        for action in (self.new_action, self.open_action, self.save_action): toolbar.addAction(action)
+        for action in (self.new_action, self.open_action): toolbar.addAction(action)
+        toolbar.addAction(self.recent_menu.menuAction()); toolbar.addAction(self.save_action)
         toolbar.addSeparator(); toolbar.addAction(self.import_frames_action); toolbar.addAction(self.import_video_action)
         toolbar.addSeparator(); toolbar.addAction(self.undo_action); toolbar.addAction(self.redo_action)
         toolbar.addSeparator(); toolbar.addAction(self.settings_action)
@@ -830,6 +836,65 @@ class MainWindow(QMainWindow):
     def _double_field(low: float, high: float, step: float) -> QDoubleSpinBox:
         field = QDoubleSpinBox(); field.setRange(low, high); field.setSingleStep(step); field.setDecimals(3); return field
 
+    def read_recent_project_paths(self) -> list[Path]:
+        stored = self.settings.value("recentProjects", [])
+        if isinstance(stored, str):
+            stored = [stored]
+        paths: list[Path] = []
+        for value in stored or []:
+            path = Path(str(value)).resolve()
+            if path.is_file() and path not in paths:
+                paths.append(path)
+        paths = paths[:10]
+        self.settings.setValue("recentProjects", [str(path) for path in paths])
+        return paths
+
+    def remember_project(self, path: Path) -> None:
+        resolved = path.resolve()
+        paths = [entry for entry in self._recent_project_paths if entry != resolved and entry.is_file()]
+        self._recent_project_paths = [resolved, *paths][:10]
+        self.settings.setValue("recentProjects", [str(entry) for entry in self._recent_project_paths])
+        if hasattr(self, "recent_menu"):
+            self.update_recent_projects_menu()
+
+    def forget_recent_project(self, path: Path) -> None:
+        resolved = path.resolve()
+        self._recent_project_paths = [entry for entry in self._recent_project_paths if entry != resolved and entry.is_file()]
+        self.settings.setValue("recentProjects", [str(entry) for entry in self._recent_project_paths])
+        if hasattr(self, "recent_menu"):
+            self.update_recent_projects_menu()
+
+    def clear_recent_projects(self) -> None:
+        self._recent_project_paths = []
+        self.settings.remove("recentProjects")
+        self.update_recent_projects_menu()
+        self.status_label.setText("Список недавних проектов очищен")
+
+    def update_recent_projects_menu(self) -> None:
+        self.recent_menu.clear()
+        valid = [path for path in self._recent_project_paths if path.is_file()]
+        if valid != self._recent_project_paths:
+            self._recent_project_paths = valid
+            self.settings.setValue("recentProjects", [str(path) for path in valid])
+        if not valid:
+            empty = self.recent_menu.addAction("Список пуст")
+            empty.setEnabled(False)
+            return
+        for path in valid:
+            label = f"{path.parent.name} — {path.parent.parent}"
+            action = self.recent_menu.addAction(label)
+            action.setToolTip(str(path))
+            action.triggered.connect(lambda _checked=False, project_path=path: self.open_recent_project(project_path))
+        self.recent_menu.addSeparator()
+        self.recent_menu.addAction("Очистить список", self.clear_recent_projects)
+
+    def open_recent_project(self, path: Path) -> None:
+        if not path.is_file():
+            self.forget_recent_project(path)
+            QMessageBox.information(self, APP_NAME, "Проект больше не существует.")
+            return
+        self.load_project(path)
+
     def current_frame(self) -> int:
         return self.project.playhead if self.project else 0
 
@@ -850,6 +915,7 @@ class MainWindow(QMainWindow):
             suffix = time.time_ns() % 1_000_000
             project_root = base / f"Auto-{stamp}-{suffix:06d}"
             self.project = Project.create(project_root)
+            self.remember_project(self.project.file_path)
             self.reset_history()
             self.update_project_ui()
             self.status_label.setText(f"Рабочий проект создан автоматически: {project_root}")
@@ -871,6 +937,7 @@ class MainWindow(QMainWindow):
             return False
         try:
             self.project = Project.create(root)
+            self.remember_project(self.project.file_path)
             self.reset_history()
             self.update_project_ui()
             return True
@@ -885,6 +952,7 @@ class MainWindow(QMainWindow):
     def load_project(self, path: Path) -> bool:
         try:
             self.project = Project.load(path)
+            self.remember_project(self.project.file_path)
             self.fps_field.setValue(self.project.fps)
             self.reset_history(); self.update_project_ui(); self.set_frame(self.project.playhead)
             self.status_label.setText(f"Проект открыт: {self.project.name}")
@@ -1289,6 +1357,7 @@ class MainWindow(QMainWindow):
             return
         project = self.project
         try:
+            self.forget_recent_project(project.file_path)
             self.play_timer.stop()
             self.autosave.stop()
             managed_folders = (project.frames_dir, project.assets_dir, project.source_dir, project.styles_dir, project.output_dir)
@@ -1363,7 +1432,10 @@ class MainWindow(QMainWindow):
             answer = QMessageBox.question(self, APP_NAME, "Рендер идёт. Остановить его и выйти?")
             if answer != QMessageBox.StandardButton.Yes: event.ignore(); return
             self.render_worker.stop(); self.render_worker.wait(3000)
-        self.save_project(); event.accept()
+        self.save_project()
+        if self.project:
+            self.remember_project(self.project.file_path)
+        event.accept()
 
 
 def main() -> int:

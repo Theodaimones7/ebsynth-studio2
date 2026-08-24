@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from gui.editor_model import Project
@@ -24,7 +25,7 @@ class ProjectCleanupTests(unittest.TestCase):
             for path in (source, keyframe, result, style):
                 path.write_bytes(b"test")
 
-            window = MainWindow()
+            window = MainWindow(QSettings(str(Path(folder) / "settings.ini"), QSettings.Format.IniFormat))
             window.project = project
             with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
                 window.clear_render_result()
@@ -45,7 +46,7 @@ class ProjectCleanupTests(unittest.TestCase):
             for directory in (project.frames_dir, project.assets_dir, project.source_dir, project.styles_dir, project.output_dir):
                 (directory / "generated.tmp").write_bytes(b"test")
 
-            window = MainWindow()
+            window = MainWindow(QSettings(str(Path(folder) / "settings.ini"), QSettings.Format.IniFormat))
             window.project = project
             with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
                 window.restart_project()
