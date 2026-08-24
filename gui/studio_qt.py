@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QMimeData, QPointF, QRectF, QSize, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QMimeData, QPointF, QRectF, QSize, QStandardPaths, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -752,10 +752,30 @@ class MainWindow(QMainWindow):
     def current_frame(self) -> int:
         return self.project.playhead if self.project else 0
 
-    def ensure_project(self) -> bool:
+    def ensure_project(self, automatic: bool = False) -> bool:
         if self.project:
             return True
-        return self.new_project()
+        return self.create_automatic_project() if automatic else self.new_project()
+
+    @staticmethod
+    def automatic_projects_root() -> Path:
+        location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation)
+        return Path(location) / "Projects"
+
+    def create_automatic_project(self) -> bool:
+        try:
+            base = self.automatic_projects_root()
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            suffix = time.time_ns() % 1_000_000
+            project_root = base / f"Auto-{stamp}-{suffix:06d}"
+            self.project = Project.create(project_root)
+            self.reset_history()
+            self.update_project_ui()
+            self.status_label.setText(f"Рабочий проект создан автоматически: {project_root}")
+            return True
+        except Exception as exc:
+            QMessageBox.critical(self, APP_NAME, f"Не удалось создать рабочий проект: {exc}")
+            return False
 
     def new_project(self) -> bool:
         folder = QFileDialog.getExistingDirectory(self, "Выберите пустую папку проекта")
@@ -807,8 +827,8 @@ class MainWindow(QMainWindow):
         if files:
             self.import_frames([Path(path) for path in files])
 
-    def import_frames(self, paths: list[Path]) -> None:
-        if not self.ensure_project() or not self.project:
+    def import_frames(self, paths: list[Path], automatic_project: bool = False) -> None:
+        if not self.ensure_project(automatic_project) or not self.project:
             return
         try:
             ordered = image_files(paths)
@@ -826,8 +846,8 @@ class MainWindow(QMainWindow):
         if file_name:
             self.import_video(Path(file_name))
 
-    def import_video(self, source: Path) -> None:
-        if not self.ensure_project() or not self.project:
+    def import_video(self, source: Path, automatic_project: bool = False) -> None:
+        if not self.ensure_project(automatic_project) or not self.project:
             return
         ffmpeg, ffprobe = locate_tool("ffmpeg.exe"), locate_tool("ffprobe.exe")
         if not ffmpeg or not ffprobe:
@@ -863,7 +883,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         """Import dropped images as source frames until a source is loaded."""
         if not self.project or not self.project.frames:
-            self.import_frames(paths)
+            self.import_frames(paths, automatic_project=True)
             return
         target_frame = self.current_frame() if frame_index is None else frame_index
         self.import_keyframes(paths, target_frame, point)
@@ -1155,8 +1175,8 @@ class MainWindow(QMainWindow):
         videos = [path for path in paths if path.suffix.casefold() in VIDEO_EXTENSIONS]
         images = image_files(paths)
         if not self.project or not self.project.frames:
-            if videos: self.import_video(videos[0])
-            elif images: self.import_frames(images)
+            if videos: self.import_video(videos[0], automatic_project=True)
+            elif images: self.import_frames(images, automatic_project=True)
         elif images:
             self.import_keyframes(images)
         event.acceptProposedAction()

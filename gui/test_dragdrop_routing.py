@@ -15,8 +15,8 @@ class DropTarget:
         self.frame_imports = []
         self.keyframe_imports = []
 
-    def import_frames(self, paths):
-        self.frame_imports.append(paths)
+    def import_frames(self, paths, automatic_project=False):
+        self.frame_imports.append((paths, automatic_project))
 
     def import_keyframes(self, paths, frame_index=None, point=None):
         self.keyframe_imports.append((paths, frame_index, point))
@@ -32,7 +32,7 @@ class DragDropRoutingTests(unittest.TestCase):
 
         target.handle_source_or_keyframe_drop(paths, point=QPointF(10, 20))
 
-        self.assertEqual(target.frame_imports, [paths])
+        self.assertEqual(target.frame_imports, [(paths, True)])
         self.assertEqual(target.keyframe_imports, [])
 
     def test_drop_with_source_imports_keyframe_at_timeline_frame(self):
